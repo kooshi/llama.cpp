@@ -2,6 +2,7 @@
 #include "common.h"
 #include "log.h"
 #include "llama.h"
+#include "sampling.h"
 
 #include <chrono>
 #include <algorithm>
@@ -695,7 +696,7 @@ static bool decode_helper(llama_context * ctx, llama_batch & batch, std::vector<
 #define K_TOKEN_CHUNK 4
 
 static void compute_logprobs(const float * batch_logits, int n_vocab, std::vector<std::thread>& workers,
-        const std::vector<std::pair<size_t, llama_token>>& eval_pairs, std::vector<float>& eval_results) {
+        const std::vector<std::pair<size_t, llama_token>>& eval_pairs, std::vector<float>& eval_results,  llama_sampler * sampler) {
     if (eval_results.size() != eval_pairs.size()) {
         eval_results.resize(eval_pairs.size());
     }
@@ -706,7 +707,7 @@ static void compute_logprobs(const float * batch_logits, int n_vocab, std::vecto
     size_t max_threads = std::min((eval_pairs.size() + K_TOKEN_CHUNK - 1)/K_TOKEN_CHUNK, workers.size());
 
     std::atomic<int> counter(0);
-    auto compute = [&counter, &eval_pairs, &eval_results, batch_logits, n_vocab] () {
+    auto compute = [&counter, &eval_pairs, &eval_results, batch_logits, n_vocab, sampler] () {
         float local_logprobs[K_TOKEN_CHUNK];
         while (true) {
             const size_t first = counter.fetch_add(K_TOKEN_CHUNK, std::memory_order_relaxed);
@@ -716,15 +717,34 @@ static void compute_logprobs(const float * batch_logits, int n_vocab, std::vecto
             const size_t last = std::min(first + K_TOKEN_CHUNK, eval_results.size());
             for (size_t i = first; i < last; ++i) {
                 const auto * logits = batch_logits + eval_pairs[i].first * n_vocab;
-                float max_logit = logits[0];
-                for (int j = 1; j < n_vocab; ++j) {
-                    max_logit = std::max(max_logit, logits[j]);
-                }
-                float sum_p = 0.f;
+                const llama_token target_token = eval_pairs[i].second;
+
+                std::vector<llama_token_data> candidates;
+                candidates.reserve(n_vocab);
                 for (int j = 0; j < n_vocab; ++j) {
-                    sum_p += expf(logits[j] - max_logit);
+                    candidates.emplace_back(llama_token_data{ (llama_token)j, logits[j], 0.0f });
                 }
-                local_logprobs[i - first] = logits[eval_pairs[i].second] - max_logit - std::log(sum_p);
+
+                llama_token_data_array cur_p = { candidates.data(), candidates.size(), -1, false };
+
+                if (sampler) {
+                    llama_sampler_apply(sampler, &cur_p);
+                }
+
+                // Re-calculate softmax on potentially modified logits
+                float max_l = -INFINITY;
+                for (size_t j = 0; j < cur_p.size; ++j) {
+                    max_l = std::max(max_l, cur_p.data[j].logit);
+                }
+
+                double sum_exp = 0.0;
+                for (size_t j = 0; j < cur_p.size; ++j) {
+                    sum_exp += expf(cur_p.data[j].logit - max_l);
+                }
+
+                const float target_logit = logits[target_token]; // Use original logit for the target token
+
+                local_logprobs[i - first] = target_logit - max_l - std::log(sum_exp);
             }
             std::memcpy(eval_results.data() + first, local_logprobs, (last - first)*sizeof(float));
         }
@@ -738,7 +758,7 @@ static void compute_logprobs(const float * batch_logits, int n_vocab, std::vecto
     }
 }
 
-static void hellaswag_score(llama_context * ctx, const common_params & params) {
+static void hellaswag_score(llama_context * ctx, const common_params & params, llama_sampler * sampler) {
     const llama_model * model = llama_get_model(ctx);
     const llama_vocab * vocab = llama_model_get_vocab(model);
 
@@ -945,7 +965,7 @@ static void hellaswag_score(llama_context * ctx, const common_params & params) {
             }
         }
         // Then we do the actual calculation
-        compute_logprobs(batch_logits.data(), n_vocab, workers, eval_pairs, eval_results);
+        compute_logprobs(batch_logits.data(), n_vocab, workers, eval_pairs, eval_results, sampler);
 
         size_t ir = 0;
 
@@ -1011,7 +1031,7 @@ static void hellaswag_score(llama_context * ctx, const common_params & params) {
     LOG("\n");
 }
 
-struct winogrande_entry {
+struct multi_choice_entry {
     std::string first;
     std::string second;
     std::array<std::string, 2> choices;
@@ -1025,8 +1045,8 @@ struct winogrande_entry {
     std::vector<llama_token> seq_tokens[2];
 };
 
-static std::vector<winogrande_entry> load_winogrande_from_csv(const std::string & prompt) {
-    std::vector<winogrande_entry> result;
+static std::vector<multi_choice_entry> load_winogrande_from_csv(const std::string & prompt) {
+    std::vector<multi_choice_entry> result;
     std::istringstream in(prompt);
     std::string line;
     std::array<int, 4> comma_pos;
@@ -1095,7 +1115,7 @@ static std::vector<winogrande_entry> load_winogrande_from_csv(const std::string 
  *    0,Sarah was a much better surgeon than Maria so _ always got the easier cases.,Sarah,Maria,2
  *
  */
-static void winogrande_score(llama_context * ctx, const common_params & params) {
+static void winogrande_score(llama_context * ctx, const common_params & params, llama_sampler * sampler) {
     const llama_model * model = llama_get_model(ctx);
     const llama_vocab * vocab = llama_model_get_vocab(model);
 
@@ -1117,7 +1137,7 @@ static void winogrande_score(llama_context * ctx, const common_params & params) 
             aux[i] = i;
         }
         float scale = 1/(1.f + (float)rng.max());
-        std::vector<winogrande_entry> selected;
+        std::vector<multi_choice_entry> selected;
         selected.resize(params.winogrande_tasks);
         for (int i = 0; i < int(params.winogrande_tasks); ++i) {
             int j = int(scale*rng()*aux.size());
@@ -1247,7 +1267,7 @@ static void winogrande_score(llama_context * ctx, const common_params & params) 
                 eval_pairs.emplace_back(task.i_logits + li++, task.seq_tokens[1][j+1]);
             }
         }
-        compute_logprobs(batch_logits.data(), n_vocab, workers, eval_pairs, eval_results);
+        compute_logprobs(batch_logits.data(), n_vocab, workers, eval_pairs, eval_results, sampler);
 
         size_t ir = 0;
         for (size_t i = i0; i < i1; ++i) {
@@ -1399,7 +1419,7 @@ static bool multiple_choice_prepare_one_task(llama_context * ctx, multiple_choic
 //     git@hf.co:datasets/Stevross/mmlu
 //     https://huggingface.co/datasets/truthful_qa
 //
-static void multiple_choice_score(llama_context * ctx, const common_params & params) {
+static void multiple_choice_score(llama_context * ctx, const common_params & params, llama_sampler * sampler) {
     const llama_model * model = llama_get_model(ctx);
     const llama_vocab * vocab = llama_model_get_vocab(model);
 
@@ -1617,7 +1637,7 @@ static void multiple_choice_score(llama_context * ctx, const common_params & par
             }
         }
         // Then we do the actual calculation
-        compute_logprobs(batch_logits.data(), n_vocab, workers, eval_pairs, eval_results);
+        compute_logprobs(batch_logits.data(), n_vocab, workers, eval_pairs, eval_results, sampler);
 
         size_t ir = 0;
 
@@ -2032,6 +2052,8 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    const llama_vocab * vocab = llama_model_get_vocab(model);
+
     const int n_ctx_train = llama_model_n_ctx_train(model);
 
     if (params.n_ctx > n_ctx_train) {
@@ -2046,12 +2068,42 @@ int main(int argc, char ** argv) {
     }
 
     struct results_perplexity results;
-    if (params.hellaswag) {
-        hellaswag_score(ctx, params);
-    } else if (params.winogrande) {
-        winogrande_score(ctx, params);
-    } else if (params.multiple_choice) {
-        multiple_choice_score(ctx, params);
+    if (params.hellaswag || params.winogrande || params.multiple_choice) {
+        // Manually create the sampler chain
+        llama_sampler_chain_params sparams = llama_sampler_chain_default_params();
+        sparams.no_perf = params.sampling.no_perf;
+        llama_sampler * sampler = llama_sampler_chain_init(sparams);
+
+        for (const auto & cnstr : params.sampling.samplers) {
+            switch (cnstr) {
+                case COMMON_SAMPLER_TYPE_DRY:
+                    {
+                        std::vector<const char *> c_breakers;
+                        c_breakers.reserve(params.sampling.dry_sequence_breakers.size());
+                        for (const auto & str : params.sampling.dry_sequence_breakers) {
+                            c_breakers.push_back(str.c_str());
+                        }
+                        llama_sampler_chain_add(sampler, llama_sampler_init_dry(vocab, llama_model_n_ctx_train(model), params.sampling.dry_multiplier, params.sampling.dry_base, params.sampling.dry_allowed_length, params.sampling.dry_penalty_last_n, c_breakers.data(), c_breakers.size()));
+                    }
+                    break;
+                case COMMON_SAMPLER_TYPE_TOP_K:       llama_sampler_chain_add(sampler, llama_sampler_init_top_k       (params.sampling.top_k)); break;
+                case COMMON_SAMPLER_TYPE_TOP_P:       llama_sampler_chain_add(sampler, llama_sampler_init_top_p       (params.sampling.top_p, params.sampling.min_keep)); break;
+                case COMMON_SAMPLER_TYPE_TOP_N_SIGMA: llama_sampler_chain_add(sampler, llama_sampler_init_top_n_sigma (params.sampling.top_n_sigma)); break;
+                case COMMON_SAMPLER_TYPE_MIN_P:       llama_sampler_chain_add(sampler, llama_sampler_init_min_p       (params.sampling.min_p, params.sampling.min_keep)); break;
+                case COMMON_SAMPLER_TYPE_XTC:         llama_sampler_chain_add(sampler, llama_sampler_init_xtc         (params.sampling.xtc_probability, params.sampling.xtc_threshold, params.sampling.min_keep, params.sampling.seed)); break;
+                case COMMON_SAMPLER_TYPE_TYPICAL_P:   llama_sampler_chain_add(sampler, llama_sampler_init_typical     (params.sampling.typ_p, params.sampling.min_keep)); break;
+                case COMMON_SAMPLER_TYPE_TEMPERATURE: llama_sampler_chain_add(sampler, llama_sampler_init_temp_ext    (params.sampling.temp, params.sampling.dynatemp_range, params.sampling.dynatemp_exponent)); break;
+                case COMMON_SAMPLER_TYPE_INFILL:      llama_sampler_chain_add(sampler, llama_sampler_init_infill      (vocab)); break;
+                case COMMON_SAMPLER_TYPE_PENALTIES:   llama_sampler_chain_add(sampler, llama_sampler_init_penalties   (params.sampling.penalty_last_n, params.sampling.penalty_repeat, params.sampling.penalty_freq, params.sampling.penalty_present)); break;
+                case COMMON_SAMPLER_TYPE_TOKEN_LEN:   llama_sampler_chain_add(sampler, llama_sampler_init_token_len   (vocab, params.sampling.len_factor)); break;
+                default: break;
+            }
+        }
+
+        if (params.hellaswag)        hellaswag_score(ctx, params, sampler);
+        if (params.winogrande)       winogrande_score(ctx, params, sampler);
+        if (params.multiple_choice)  multiple_choice_score(ctx, params, sampler);
+        llama_sampler_free(sampler);
     } else if (params.kl_divergence) {
         kl_divergence(ctx, params);
     } else {

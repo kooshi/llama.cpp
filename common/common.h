@@ -103,6 +103,7 @@ enum common_sampler_type {
     COMMON_SAMPLER_TYPE_INFILL      = 9,
     COMMON_SAMPLER_TYPE_PENALTIES   = 10,
     COMMON_SAMPLER_TYPE_TOP_N_SIGMA = 11,
+    COMMON_SAMPLER_TYPE_TOKEN_LEN   = 12,
 };
 
 // dimensionality reduction methods, used by cvector-generator
@@ -158,6 +159,7 @@ struct common_params_sampling {
     float   top_n_sigma        = -1.00f;// -1.0 = disabled
     float   mirostat_tau       = 5.00f; // target entropy
     float   mirostat_eta       = 0.10f; // learning rate
+    float   len_factor         = 0.0f;  // factor for token length bias (0.0 = disabled)
     bool    ignore_eos         = false;
     bool    no_perf            = false; // disable performance metrics
     bool    timing_per_token   = false;
@@ -167,6 +169,7 @@ struct common_params_sampling {
 
     std::vector<enum common_sampler_type> samplers = {
         COMMON_SAMPLER_TYPE_PENALTIES,
+        COMMON_SAMPLER_TYPE_TOKEN_LEN,
         COMMON_SAMPLER_TYPE_DRY,
         COMMON_SAMPLER_TYPE_TOP_N_SIGMA,
         COMMON_SAMPLER_TYPE_TOP_K,

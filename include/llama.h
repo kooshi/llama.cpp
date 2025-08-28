@@ -1160,6 +1160,10 @@ extern "C" {
     /// @details Top n sigma sampling as described in academic paper "Top-nσ: Not All Logits Are You Need" https://arxiv.org/pdf/2411.07641
     LLAMA_API struct llama_sampler * llama_sampler_init_top_n_sigma(float   n);
 
+    /// @details Applies a positive bias to logits of longer tokens. The factor is `(1 + strength * log(length))`.
+    LLAMA_API struct llama_sampler * llama_sampler_init_token_len(const struct llama_vocab * vocab, float len_factor);
+
+
     /// @details Mirostat 1.0 algorithm described in the paper https://arxiv.org/abs/2007.14966. Uses tokens instead of words.
     /// @param candidates A vector of `llama_token_data` containing the candidate tokens, their probabilities (p), and log-odds (logit) for the current position in the generated text.
     /// @param tau  The target cross-entropy (or surprise) value you want to achieve for the generated text. A higher value corresponds to more surprising or less predictable text, while a lower value corresponds to less surprising or more predictable text.

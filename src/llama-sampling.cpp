@@ -1816,6 +1816,63 @@ struct llama_sampler * llama_sampler_init_top_n_sigma(float n) {
     );
 }
 
+// token length
+
+struct llama_sampler_token_len {
+    const struct llama_vocab * vocab;
+    const float len_factor;
+};
+
+static const char * llama_sampler_token_len_name(const struct llama_sampler * /*smpl*/) {
+    return "token_len";
+}
+
+static void llama_sampler_token_len_apply(struct llama_sampler * smpl, llama_token_data_array * cur_p) {
+    auto * ctx = (llama_sampler_token_len *) smpl->ctx;
+
+    if (ctx->len_factor == 0.0f) {
+        return;
+    }
+
+    for (size_t i = 0; i < cur_p->size; ++i) {
+        const auto & token_piece = ctx->vocab->token_to_piece(cur_p->data[i].id);
+        const size_t len = token_piece.length();
+        if (len > 0) {
+            cur_p->data[i].logit *= (1.0f + ctx->len_factor * logf((float)len));
+        }
+    }
+
+    cur_p->sorted = false;
+}
+
+static struct llama_sampler * llama_sampler_token_len_clone(const struct llama_sampler * smpl) {
+    const auto * ctx = (const llama_sampler_token_len *) smpl->ctx;
+    return llama_sampler_init_token_len(ctx->vocab, ctx->len_factor);
+}
+
+static void llama_sampler_token_len_free(struct llama_sampler * smpl) {
+    delete (llama_sampler_token_len *) smpl->ctx;
+}
+
+static struct llama_sampler_i llama_sampler_token_len_i = {
+    /* .name   = */ llama_sampler_token_len_name,
+    /* .accept = */ nullptr,
+    /* .apply  = */ llama_sampler_token_len_apply,
+    /* .reset  = */ nullptr,
+    /* .clone  = */ llama_sampler_token_len_clone,
+    /* .free   = */ llama_sampler_token_len_free,
+};
+
+struct llama_sampler * llama_sampler_init_token_len(const struct llama_vocab * vocab, float len_factor) {
+    return llama_sampler_init(
+        /* .iface = */ &llama_sampler_token_len_i,
+        /* .ctx   = */ new llama_sampler_token_len {
+            /* .vocab       = */ vocab,
+            /* .len_factor  = */ len_factor,
+        }
+    );
+}
+
 // DRY
 
 struct llama_sampler_dry {

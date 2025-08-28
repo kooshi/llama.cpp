@@ -1885,6 +1885,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_sparam());
     add_opt(common_arg(
+        {"--len-factor"}, "N",
+        string_format("token length factor (default: %.1f, 0.0 = disabled)", (double)params.sampling.len_factor),
+        [](common_params & params, const std::string & value) {
+            params.sampling.len_factor = std::stof(value);
+        }
+    ).set_sparam());
+    add_opt(common_arg(
         {"--dry-multiplier"}, "N",
         string_format("set DRY sampling multiplier (default: %.1f, 0.0 = disabled)", (double)params.sampling.dry_multiplier),
         [](common_params & params, const std::string & value) {

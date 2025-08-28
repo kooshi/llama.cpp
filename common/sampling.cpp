@@ -269,6 +269,9 @@ struct common_sampler * common_sampler_init(const struct llama_model * model, co
                 case COMMON_SAMPLER_TYPE_PENALTIES:
                     llama_sampler_chain_add(result->chain, llama_sampler_init_penalties   (params.penalty_last_n, params.penalty_repeat, params.penalty_freq, params.penalty_present));
                     break;
+                case COMMON_SAMPLER_TYPE_TOKEN_LEN:
+                    llama_sampler_chain_add(result->chain, llama_sampler_init_token_len   (vocab, params.len_factor));
+                    break;
                 default:
                     GGML_ASSERT(false && "unknown sampler type");
             }
@@ -478,6 +481,7 @@ char common_sampler_type_to_chr(enum common_sampler_type cnstr) {
         case COMMON_SAMPLER_TYPE_XTC:         return 'x';
         case COMMON_SAMPLER_TYPE_INFILL:      return 'i';
         case COMMON_SAMPLER_TYPE_PENALTIES:   return 'e';
+        case COMMON_SAMPLER_TYPE_TOKEN_LEN:   return 'l';
         default : return '?';
     }
 }
@@ -494,6 +498,7 @@ std::string common_sampler_type_to_str(enum common_sampler_type cnstr) {
         case COMMON_SAMPLER_TYPE_XTC:         return "xtc";
         case COMMON_SAMPLER_TYPE_INFILL:      return "infill";
         case COMMON_SAMPLER_TYPE_PENALTIES:   return "penalties";
+        case COMMON_SAMPLER_TYPE_TOKEN_LEN:   return "token_len";
         default : return "";
     }
 }
@@ -510,6 +515,7 @@ std::vector<common_sampler_type> common_sampler_types_from_names(const std::vect
         { "xtc",         COMMON_SAMPLER_TYPE_XTC },
         { "infill",      COMMON_SAMPLER_TYPE_INFILL },
         { "penalties",   COMMON_SAMPLER_TYPE_PENALTIES },
+        { "token_len",   COMMON_SAMPLER_TYPE_TOKEN_LEN },
     };
 
     // since samplers names are written multiple ways
@@ -561,6 +567,7 @@ std::vector<common_sampler_type> common_sampler_types_from_chars(const std::stri
         { common_sampler_type_to_chr(COMMON_SAMPLER_TYPE_XTC),         COMMON_SAMPLER_TYPE_XTC },
         { common_sampler_type_to_chr(COMMON_SAMPLER_TYPE_INFILL),      COMMON_SAMPLER_TYPE_INFILL },
         { common_sampler_type_to_chr(COMMON_SAMPLER_TYPE_PENALTIES),   COMMON_SAMPLER_TYPE_PENALTIES },
+        { common_sampler_type_to_chr(COMMON_SAMPLER_TYPE_TOKEN_LEN),   COMMON_SAMPLER_TYPE_TOKEN_LEN },
     };
 
     std::vector<common_sampler_type> samplers;
